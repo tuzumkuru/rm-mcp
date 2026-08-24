@@ -16,6 +16,7 @@ from typing import Optional, Set
 
 from mcp.types import Completion, ResourceTemplateReference
 
+from rm_mcp.config import env_bool
 from rm_mcp.paths import _apply_root_filter, _get_root_path, _is_within_root
 from rm_mcp.server import mcp
 
@@ -34,15 +35,18 @@ _MAX_FETCH_ATTEMPTS = 3
 # Page suggestions offered before a document's real page count is known
 _DEFAULT_COMPLETION_PAGES = 10
 
+# Content indexing: documents above this size are skipped (they are loaded
+# fully into memory to extract), and this pause between documents keeps the
+# background pass polite to both the API and the event loop.
+_MAX_CONTENT_INDEX_BYTES = 100 * 1024 * 1024
+_CONTENT_INDEX_PAUSE_SECONDS = 1.0
+
 
 def _file_type_for(doc) -> str:
-    """Classify a document by filename extension."""
-    name_lower = doc.VissibleName.lower()
-    if name_lower.endswith(".pdf"):
-        return "pdf"
-    if name_lower.endswith(".epub"):
-        return "epub"
-    return "notebook"
+    """Classify a document by its blobs (falls back to the name)."""
+    from rm_mcp.api import get_file_type
+
+    return get_file_type(None, doc)
 
 
 def _get_index():
@@ -285,6 +289,62 @@ def _register_document(client, doc, items_by_id=None, root: str = "/") -> bool:
     return True
 
 
+async def _index_document_content(client, candidates, shutdown_event: asyncio.Event):
+    """Download and index the text of PDFs and EPUBs that are not searchable yet.
+
+    Runs after registration so it never delays startup, one document at a time
+    with a pause between them. Extraction goes through the shared cache layer,
+    whose write-through stores the text in the persistent index — the same path
+    a read through the tool takes, so the two can never disagree.
+
+    Smallest documents first: coverage grows fastest that way, and an
+    interrupted pass resumes where it left off because indexed documents are
+    filtered out on the next startup.
+    """
+    from rm_mcp.tools._helpers import extract_document
+
+    skipped_large = [c for c in candidates if c.size and c.size > _MAX_CONTENT_INDEX_BYTES]
+    todo = sorted(
+        (c for c in candidates if c not in skipped_large),
+        key=lambda d: d.size or 0,
+    )
+    for doc in skipped_large:
+        logger.info(
+            "Content indexing skipped '%s': %d MB exceeds the %d MB limit",
+            doc.VissibleName,
+            doc.size // (1024 * 1024),
+            _MAX_CONTENT_INDEX_BYTES // (1024 * 1024),
+        )
+
+    if not todo:
+        return
+
+    logger.info("Content indexing: %d document(s) to make searchable", len(todo))
+    done = failed = 0
+    for doc in todo:
+        if shutdown_event.is_set():
+            logger.info(
+                "Content indexing stopped by shutdown (%d/%d done; resumes next start)",
+                done,
+                len(todo),
+            )
+            return
+        try:
+            await extract_document(client, doc, include_ocr=False)
+            index = _get_index()
+            if index is not None and not index.has_indexed_content(doc.ID):
+                # No text layer at all (a scan, an image-only PDF). Record an
+                # empty marker so the next startup does not download it again.
+                index.upsert_page(doc.ID, 0, "", "no_text")
+            done += 1
+        except Exception:
+            failed += 1
+            logger.warning("Content indexing failed for '%s'", doc.VissibleName, exc_info=True)
+        await asyncio.sleep(_CONTENT_INDEX_PAUSE_SECONDS)
+
+    logger.info("Content indexing complete: %d indexed, %d failed", done, failed)
+
+
 async def _load_documents_background(shutdown_event: asyncio.Event):
     """
     Background task to load and register documents in batches.
@@ -335,6 +395,7 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
         documents = [item for item in items if not item.is_folder]
         index = _get_index()
         indexed_ids = set()
+        content_candidates = []  # PDFs/EPUBs whose text is not yet searchable
 
         registered_count = 0
         for position, doc in enumerate(documents, 1):
@@ -372,6 +433,13 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
                         ),
                     )
                     indexed_ids.add(doc.ID)
+                    # PDFs and EPUBs can be made searchable without the client:
+                    # their text is in the archive. Notebooks need the client's
+                    # model for OCR, so they are indexed as they are read.
+                    if _file_type_for(doc) in ("pdf", "epub") and not index.has_indexed_content(
+                        doc.ID
+                    ):
+                        content_candidates.append(doc)
                 except Exception:
                     logger.debug("Index metadata write failed", exc_info=True)
 
@@ -391,6 +459,11 @@ async def _load_documents_background(shutdown_event: asyncio.Event):
             f"Background loader complete: {registered_count} documents registered"
             + (f" (filtered to {root})" if root != "/" else "")
         )
+
+        # Second pass: make PDF/EPUB text searchable before anything has been
+        # read through a tool. Opt out with REMARKABLE_INDEX_CONTENT=0.
+        if index is not None and content_candidates and env_bool("REMARKABLE_INDEX_CONTENT", True):
+            await _index_document_content(client, content_candidates, shutdown_event)
 
     except asyncio.CancelledError:
         logger.info("Background document loader cancelled")

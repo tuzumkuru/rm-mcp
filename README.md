@@ -263,6 +263,7 @@ Default is `#FBFBFB` (reMarkable paper color). This affects both the `remarkable
 | `REMARKABLE_MAX_OUTPUT_CHARS` | `50000` | Maximum characters in tool responses |
 | `REMARKABLE_PAGE_SIZE` | `8000` | PDF/EPUB page size in characters |
 | `REMARKABLE_PARALLEL_WORKERS` | `5` | Parallel workers for metadata fetching |
+| `REMARKABLE_INDEX_CONTENT` | `1` | Set to `0` to disable background indexing of PDF/EPUB text |
 | `REMARKABLE_INDEX_PATH` | `~/.cache/rm-mcp/index.db` | SQLite full-text search index location |
 | `REMARKABLE_INDEX_REBUILD` | *(off)* | Set to `1` to force index rebuild on startup |
 

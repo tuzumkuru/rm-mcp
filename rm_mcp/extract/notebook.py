@@ -151,26 +151,28 @@ def get_document_page_count(zip_path: Path) -> int:
         return len(list(tmpdir_path.glob("**/*.rm")))
 
 
-def _extract_source_text(tmpdir_path: Path) -> str:
-    """Extract the text of the original PDF or EPUB bundled in a document zip.
+def _extract_source_pages(tmpdir_path: Path) -> List[str]:
+    """Extract the original PDF or EPUB bundled in a document zip, per page.
 
     A reMarkable document zip carries the source file alongside the annotation
-    layer, so a PDF's own text is available without a second download.
+    layer, so a PDF's own text is available without a second download. PDF
+    entries are aligned with the document's real page numbers (blank pages stay
+    as empty strings); EPUB entries are the spine's content documents.
     """
-    from rm_mcp.extract.epub import extract_text_from_epub
-    from rm_mcp.extract.pdf import extract_text_from_pdf
+    from rm_mcp.extract.epub import extract_epub_sections
+    from rm_mcp.extract.pdf import extract_pdf_pages
 
     for pdf_file in sorted(tmpdir_path.glob("**/*.pdf")):
-        text = extract_text_from_pdf(pdf_file)
-        if text:
-            return text
+        pages = extract_pdf_pages(pdf_file)
+        if any(p.strip() for p in pages):
+            return pages
 
     for epub_file in sorted(tmpdir_path.glob("**/*.epub")):
-        text = extract_text_from_epub(epub_file)
-        if text:
-            return text
+        sections = extract_epub_sections(epub_file)
+        if sections:
+            return sections
 
-    return ""
+    return []
 
 
 def extract_text_from_document_zip(
@@ -194,6 +196,7 @@ def extract_text_from_document_zip(
             "highlights": [...],       # From PDF annotations
             "handwritten_text": [...], # From OCR (if enabled) - one per page, in order
             "source_text": str,        # Text of the underlying PDF/EPUB, if any
+            "source_pages": [...],     # Same text, one entry per real page/section
             "pages": int,
             "page_ids": [...],         # Page UUIDs in order
             "ocr_backend": str,        # Which OCR backend was used (if any)
@@ -205,7 +208,7 @@ def extract_text_from_document_zip(
     # satisfy a no-OCR request, but not the other way around.
     if doc_id:
         cached = get_cached_ocr_result(doc_id, include_ocr=include_ocr)
-        if cached is not None and (cached.get("source_text") or not include_source):
+        if cached is not None and (cached.get("source_pages") or not include_source):
             return cached
 
     result: Dict[str, Any] = {
@@ -213,6 +216,7 @@ def extract_text_from_document_zip(
         "highlights": [],
         "handwritten_text": None,
         "source_text": "",
+        "source_pages": [],
         "pages": 0,
         "page_ids": [],
         "ocr_backend": None,
@@ -279,7 +283,13 @@ def extract_text_from_document_zip(
         # as opposed to the annotation layer above).
         if include_source:
             try:
-                result["source_text"] = _extract_source_text(tmpdir_path)
+                source_pages = _extract_source_pages(tmpdir_path)
+                result["source_pages"] = source_pages
+                result["source_text"] = "\n\n".join(
+                    f"--- Page {n} ---\n{text}"
+                    for n, text in enumerate(source_pages, 1)
+                    if text.strip()
+                )
             except Exception:
                 logger.warning("Failed to extract source document text", exc_info=True)
 

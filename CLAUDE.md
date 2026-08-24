@@ -128,6 +128,7 @@ The `.mcpregistry_*` token files are gitignored — never commit them.
 | `REMARKABLE_ROOT_PATH` | No | Restrict to a folder (e.g. `/Work`) |
 | `REMARKABLE_BACKGROUND_COLOR` | No | Image background, default `#FBFBFB` |
 | `REMARKABLE_CACHE_TTL` | No | Collection cache TTL in seconds, default `60` |
+| `REMARKABLE_INDEX_CONTENT` | No | Set `0` to disable background PDF/EPUB text indexing |
 | `REMARKABLE_INDEX_PATH` | No | FTS index location, default `~/.cache/rm-mcp/index.db` |
 | `REMARKABLE_COMPACT` | No | Set `1` or `true` to omit hints globally |
 | `REMARKABLE_MAX_OUTPUT_CHARS` | No | Max tool response size, default `50000` |

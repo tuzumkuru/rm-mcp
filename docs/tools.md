@@ -125,10 +125,16 @@ remarkable_read("/Work/Projects/Q4 Planning")
 
 ### Pagination
 
-- **PDF/EPUB**: Pages are ~8000 character chunks of extracted text. Use `pages="all"` to get the full text.
-- **Notebooks**: Pages correspond to actual notebook pages. Use `pages="all"` or a range to read multiple.
+`page=N` means the real page N:
 
-When `more: true`, use the `page` parameter to continue reading, or `pages="all"` to get everything.
+- **PDF**: the document's own pages (`page_type: "page"`). A page with no text layer returns empty rather than shifting later pages.
+- **EPUB**: the spine's content documents, roughly chapters (`page_type: "section"`).
+- **Notebooks**: actual notebook pages (`page_type: "notebook"`).
+
+Reading a page of a PDF/EPUB returns the source text only; if the document
+carries highlights or notes, the response sets `has_annotations: true` — fetch
+them with `content_type="annotations"`. Use `pages="all"` or a range to read
+multiple pages in one call. When `more: true`, continue with `page`.
 
 ---
 
@@ -214,7 +220,7 @@ remarkable_search("journal", grep="project idea", include_ocr=True)
 
 - **Without `grep`**: Returns metadata only (name, path, file_type, modified). No cloud downloads — fast.
 - **With `grep`**: Searches document content for the pattern. Uses the local index when available, falls back to cloud download on cache miss.
-- **Full-text search**: Reading a document via `remarkable_read` indexes its content for future search queries.
+- **Full-text search**: PDF and EPUB text is indexed automatically in the background after startup (opt out with `REMARKABLE_INDEX_CONTENT=0`), so content search covers the whole library without anything being read first. Notebooks join the index as they are read (their handwriting needs the client's model for OCR). Punctuation in queries is handled: `agent-based` searches for the phrase rather than erroring.
 - **Scope**: Content matches are checked against the live library, so results never include documents that were deleted or that fall outside `REMARKABLE_ROOT_PATH`.
 - **Limits**: A `limit` above the maximum is reduced, and the reduction is reported in `_warnings` rather than applied silently.
 

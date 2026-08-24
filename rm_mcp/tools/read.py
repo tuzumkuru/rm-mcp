@@ -31,7 +31,7 @@ async def remarkable_read(
     - "annotations": Only annotations, highlights, and handwritten notes
 
     Reading modes:
-    - Single page: page=N (default page=1), paginated
+    - Single page: page=N returns the real page N (PDF pages, EPUB sections, notebook pages)
     - Multi-page: pages="all", pages="1-3", pages="2,4,5" — returns multiple pages concatenated
     - grep auto-redirects to the first matching page when no match on current page
 
@@ -42,7 +42,7 @@ async def remarkable_read(
     - document: Document name or path (use remarkable_browse to find documents)
     - content_type: "text" (full), "annotations" (notes only)
     - page: Page number for single-page mode (default: 1)
-    - pages: Multi-page spec: "all", "1-3", "2,4,5" (overrides page param for notebooks)
+    - pages: Multi-page spec: "all", "1-3", "2,4,5" (overrides the page param)
     - grep: Regex pattern to filter content (auto-redirects to matching page)
     - include_ocr: Enable handwriting OCR for annotations (default: False)
     - auto_ocr: Auto-retry with OCR on empty notebooks (default: True, set False to skip)
@@ -86,6 +86,8 @@ async def remarkable_read(
 
         # Get annotations/typed text
         notebook_pages = []  # List of page content for notebook pagination
+        page_unit = "notebook"  # What one entry of notebook_pages is: notebook/page/section
+        has_annotations = False  # Whether the document carries annotation content
         ocr_backend_used = None  # Track which OCR backend was used
         content = None  # Will hold extraction result
         total_notebook_pages = 0  # Track total pages for sampling mode
@@ -178,25 +180,39 @@ async def remarkable_read(
                         client, target_doc, include_ocr=include_ocr
                     )
 
-                # The underlying PDF/EPUB text comes first; annotations follow.
-                if content_type == "text" and content.get("source_text"):
-                    text_parts.append(content["source_text"])
+                # PDFs and EPUBs have real pages, so "page 3" means page 3 of
+                # the document — not the third 8000-character chunk. Route them
+                # through the same per-page machinery notebooks use.
+                source_pages = content.get("source_pages") or []
+                has_annotations = bool(
+                    content.get("typed_text")
+                    or content.get("highlights")
+                    or content.get("handwritten_text")
+                )
+                if content_type == "text" and any(p.strip() for p in source_pages):
+                    notebook_pages = source_pages
+                    page_unit = "page" if file_type == "pdf" else "section"
+                    ocr_pages_covered = None
+                else:
+                    # Annotations-only reads, and documents with no page
+                    # structure, keep the character-chunk path below.
+                    if content_type == "text" and content.get("source_text"):
+                        text_parts.append(content["source_text"])
 
-                # Add annotations section
-                annotation_parts = []
-                if content.get("typed_text"):
-                    annotation_parts.extend(content["typed_text"])
-                if content.get("highlights"):
-                    annotation_parts.append("\n--- Highlights ---")
-                    annotation_parts.extend(content["highlights"])
-                if content.get("handwritten_text"):
-                    annotation_parts.append("\n--- Handwritten (OCR) ---")
-                    annotation_parts.extend(content["handwritten_text"])
+                    annotation_parts = []
+                    if content.get("typed_text"):
+                        annotation_parts.extend(content["typed_text"])
+                    if content.get("highlights"):
+                        annotation_parts.append("\n--- Highlights ---")
+                        annotation_parts.extend(content["highlights"])
+                    if content.get("handwritten_text"):
+                        annotation_parts.append("\n--- Handwritten (OCR) ---")
+                        annotation_parts.extend(content["handwritten_text"])
 
-                if annotation_parts:
-                    if text_parts and content_type == "text":
-                        text_parts.append("\n\n=== Annotations ===\n")
-                    text_parts.extend(annotation_parts)
+                    if annotation_parts:
+                        if text_parts and content_type == "text":
+                            text_parts.append("\n\n=== Annotations ===\n")
+                        text_parts.extend(annotation_parts)
 
         # For notebooks with OCR: use page-based pagination
         if notebook_pages:
@@ -263,12 +279,12 @@ async def remarkable_read(
                 result = {
                     "name": target_doc.VissibleName,
                     "path": _helpers._apply_root_filter(doc_path),
-                    "file_type": "notebook",
+                    "file_type": file_type or "notebook",
                     "content_type": content_type,
                     "content": combined,
                     "pages": returned_pages,
                     "total_pages": total_pages,
-                    "page_type": "notebook",
+                    "page_type": page_unit,
                     "total_chars": len(combined),
                     "truncated": truncated,
                     "modified": (
@@ -277,11 +293,15 @@ async def remarkable_read(
                 }
                 if include_ocr and ocr_backend_used:
                     result["ocr_backend"] = ocr_backend_used
+                if has_annotations:
+                    result["has_annotations"] = True
                 if grep:
                     result["grep"] = grep
                     result["grep_matches"] = grep_matches
 
                 hint = f"Returned {len(returned_pages)}/{total_pages} pages."
+                if has_annotations:
+                    hint += " Your highlights/notes: content_type='annotations'."
                 if truncated:
                     hint += " Output truncated at character limit."
                 return _helpers.make_response(result, hint, compact=compact)
@@ -291,7 +311,7 @@ async def remarkable_read(
                 return _helpers.make_error(
                     error_type="page_out_of_range",
                     message=f"Page {page} does not exist. "
-                    f"Document has {total_pages} notebook page(s).",
+                    f"Document has {total_pages} {page_unit}(s).",
                     suggestion=f"Use page=1 to {total_pages} to read different pages.",
                     compact=compact,
                 )
@@ -355,12 +375,12 @@ async def remarkable_read(
             result = {
                 "name": target_doc.VissibleName,
                 "path": _helpers._apply_root_filter(doc_path),
-                "file_type": "notebook",
+                "file_type": file_type or "notebook",
                 "content_type": content_type,
                 "content": page_content,
                 "page": page,
                 "total_pages": total_pages,
-                "page_type": "notebook",
+                "page_type": page_unit,
                 "total_chars": len(page_content),
                 "more": has_more,
                 "modified": (
@@ -371,6 +391,8 @@ async def remarkable_read(
             # Add OCR backend info if OCR was used
             if include_ocr and ocr_backend_used:
                 result["ocr_backend"] = ocr_backend_used
+            if has_annotations:
+                result["has_annotations"] = True
 
             if grep:
                 result["grep"] = grep
@@ -378,7 +400,7 @@ async def remarkable_read(
             if grep_redirected_from is not None:
                 result["grep_redirected_from"] = grep_redirected_from
 
-            hint_parts = [f"Notebook page {page}/{total_pages}."]
+            hint_parts = [f"{page_unit.capitalize()} {page}/{total_pages}."]
             if grep_redirected_from is not None:
                 hint_parts.insert(0, f"Auto-redirected from page {grep_redirected_from}.")
             if has_more:

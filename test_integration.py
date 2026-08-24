@@ -1597,3 +1597,223 @@ class TestFileTypeDetection:
 
         d = self.make("notes about a pdf", ["x.content", "x.metadata", "x/p1.rm"])
         assert get_file_type(None, d) == "notebook"
+
+
+class TestRealPagePagination:
+    """page=N on a PDF must mean page N of the PDF, not a character chunk."""
+
+    def make_multipage_pdf_zip(self, page_texts):
+        import fitz
+
+        pdf = fitz.open()
+        for text in page_texts:
+            pg = pdf.new_page()
+            if text:
+                pg.insert_text((72, 144), text, fontsize=14)
+        data = pdf.tobytes()
+        pdf.close()
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("doc.content", json.dumps({"cPages": {"pages": []}}))
+            zf.writestr("doc.pdf", data)
+        return buffer.getvalue()
+
+    def library_with(self, page_texts):
+        d = doc("pdf-1", "Paper.pdf")
+        return FakeLibrary([d], {"pdf-1": self.make_multipage_pdf_zip(page_texts)})
+
+    async def test_page_two_is_the_pdf_page_two(self):
+        library = self.library_with(["alpha first page", "bravo second page", "charlie third"])
+        with use_library(library):
+            data = await call("remarkable_read", document="Paper.pdf", page=2)
+
+        assert data["page"] == 2
+        assert data["total_pages"] == 3
+        assert data["page_type"] == "page"
+        assert "bravo second page" in data["content"]
+        assert "alpha" not in data["content"] and "charlie" not in data["content"]
+
+    async def test_blank_pdf_page_is_returned_empty_not_skipped(self):
+        """A page with no text layer keeps its number; skipping it would shift
+        every later page off by one."""
+        library = self.library_with(["alpha", "", "charlie third"])
+        with use_library(library):
+            data = await call("remarkable_read", document="Paper.pdf", page=3)
+        assert "charlie third" in data["content"]
+        with use_library(library):
+            data = await call("remarkable_read", document="Paper.pdf", page=2)
+        assert data["content"].strip() == ""
+        assert data["total_pages"] == 3
+
+    async def test_page_out_of_range_names_the_real_count(self):
+        library = self.library_with(["alpha", "bravo"])
+        with use_library(library):
+            data = await call("remarkable_read", document="Paper.pdf", page=9)
+        assert data["_error"]["type"] == "page_out_of_range"
+        assert "2" in data["_error"]["message"]
+
+    async def test_pages_all_concatenates_with_markers(self):
+        library = self.library_with(["alpha", "bravo", "charlie"])
+        with use_library(library):
+            data = await call("remarkable_read", document="Paper.pdf", pages="all")
+        assert data["pages"] == [1, 2, 3]
+        for word in ("alpha", "bravo", "charlie"):
+            assert word in data["content"]
+
+    async def test_grep_redirects_to_the_matching_pdf_page(self):
+        library = self.library_with(["alpha", "bravo", "the delta quadrant"])
+        with use_library(library):
+            data = await call("remarkable_read", document="Paper.pdf", grep="delta")
+        assert data["page"] == 3
+        assert data["grep_redirected_from"] == 1
+
+    async def test_annotations_are_flagged_not_mixed_into_pages(self):
+        import fitz
+
+        pdf = fitz.open()
+        pdf.new_page().insert_text((72, 144), "source page text", fontsize=14)
+        data_pdf = pdf.tobytes()
+        pdf.close()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("doc.content", json.dumps({"cPages": {"pages": []}}))
+            zf.writestr("doc.pdf", data_pdf)
+            zf.writestr("doc/notes.txt", "my typed annotation")
+        library = FakeLibrary([doc("pdf-1", "Paper.pdf")], {"pdf-1": buffer.getvalue()})
+
+        with use_library(library):
+            page1 = await call("remarkable_read", document="Paper.pdf", page=1)
+            notes = await call("remarkable_read", document="Paper.pdf", content_type="annotations")
+
+        assert page1["has_annotations"] is True
+        assert "my typed annotation" not in page1["content"]
+        assert "my typed annotation" in notes["content"]
+
+
+class TestBackgroundContentIndexing:
+    """PDF/EPUB text becomes searchable without anything being read first."""
+
+    def fresh_loader_state(self):
+        from rm_mcp import resources
+
+        resources._registered_docs.clear()
+        resources._registered_uris.clear()
+        resources._registered_img.clear()
+
+    async def run_loader(self, library):
+        import asyncio
+
+        from rm_mcp import resources
+
+        self.fresh_loader_state()
+        with patch("rm_mcp.api.get_rmapi", return_value=library):
+            with patch.object(resources, "_CONTENT_INDEX_PAUSE_SECONDS", 0):
+                await resources._load_documents_background(asyncio.Event())
+
+    async def test_pdf_is_searchable_after_startup_alone(self, clean_state):
+        library = FakeLibrary(
+            [doc("pdf-1", "Paper.pdf")],
+            {"pdf-1": make_pdf_zip("the quokka population of Rottnest Island")},
+        )
+        await self.run_loader(library)
+
+        hits = clean_state.search("quokka")
+        assert len(hits) == 1 and hits[0]["doc_id"] == "pdf-1"
+
+    async def test_notebooks_are_not_downloaded(self, clean_state):
+        """Notebook OCR needs the client's model; the loader must skip them."""
+        library = FakeLibrary(
+            [doc("nb-1", "Journal"), doc("pdf-1", "Paper.pdf")],
+            {
+                "nb-1": make_notebook_zip(["p1"]),
+                "pdf-1": make_pdf_zip("indexable text"),
+            },
+        )
+        await self.run_loader(library)
+        assert "nb-1" not in library.download_calls
+        assert "pdf-1" in library.download_calls
+
+    async def test_second_startup_downloads_nothing(self, clean_state):
+        """Already-indexed documents are filtered out, so a restart is free."""
+        library = FakeLibrary([doc("pdf-1", "Paper.pdf")], {"pdf-1": make_pdf_zip("some text")})
+        await self.run_loader(library)
+        first_run = len(library.download_calls)
+        assert first_run >= 1
+
+        cache_mod.clear_extraction_cache()
+        _helpers.clear_download_cache()
+        await self.run_loader(library)
+        assert len(library.download_calls) == first_run
+
+    async def test_scanned_pdf_is_marked_and_not_retried(self, clean_state):
+        """A PDF with no text layer must not be re-downloaded every startup."""
+        import fitz
+
+        pdf = fitz.open()
+        pdf.new_page()  # image-only page: no text
+        blank = pdf.tobytes()
+        pdf.close()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("doc.content", json.dumps({"cPages": {"pages": []}}))
+            zf.writestr("doc.pdf", blank)
+        library = FakeLibrary([doc("scan-1", "Scan.pdf")], {"scan-1": buffer.getvalue()})
+
+        await self.run_loader(library)
+        assert clean_state.has_indexed_content("scan-1")
+
+        cache_mod.clear_extraction_cache()
+        _helpers.clear_download_cache()
+        first_run = len(library.download_calls)
+        await self.run_loader(library)
+        assert len(library.download_calls) == first_run
+
+    async def test_oversized_documents_are_skipped_loudly(self, clean_state):
+        from rm_mcp import resources
+
+        big = doc("big-1", "Huge Scan.pdf")
+        big.size = resources._MAX_CONTENT_INDEX_BYTES + 1
+        library = FakeLibrary([big], {"big-1": make_pdf_zip("never fetched")})
+        await self.run_loader(library)
+
+        assert "big-1" not in library.download_calls
+        assert not clean_state.has_indexed_content("big-1")
+
+    async def test_opt_out_disables_the_pass(self, clean_state, monkeypatch):
+        monkeypatch.setenv("REMARKABLE_INDEX_CONTENT", "0")
+        library = FakeLibrary([doc("pdf-1", "Paper.pdf")], {"pdf-1": make_pdf_zip("hidden text")})
+        await self.run_loader(library)
+        assert "pdf-1" not in library.download_calls
+
+    async def test_extensionless_pdf_is_still_indexed(self, clean_state):
+        """The candidate filter must use blob-based type detection."""
+        d = doc("arxiv-1", "2304.03442")
+        d.files = [{"id": "x.pdf", "hash": "h", "type": "0", "subfiles": 0, "size": 1}]
+        library = FakeLibrary([d], {"arxiv-1": make_pdf_zip("blobtyped document text")})
+        await self.run_loader(library)
+        assert len(clean_state.search("blobtyped")) == 1
+
+
+class TestSearchQuerySyntax:
+    """Ordinary words must not be parsed as FTS5 operators."""
+
+    def seed(self, index, text):
+        index.upsert_document(doc_id="d1", name="Doc", path="/Doc", file_type="pdf")
+        index.upsert_page("d1", 1, text, "source_text")
+
+    def test_hyphenated_query_matches(self, clean_state):
+        self.seed(clean_state, "a survey of agent-based modeling techniques")
+        assert len(clean_state.search("agent-based")) == 1
+
+    def test_apostrophe_query_matches(self, clean_state):
+        self.seed(clean_state, "Claude's cycles are shockingly long")
+        assert len(clean_state.search("Claude's")) == 1
+
+    def test_dotted_query_matches(self, clean_state):
+        self.seed(clean_state, "the DeepSeek-R1 model incentivizes reasoning")
+        assert len(clean_state.search("DeepSeek-R1")) == 1
+
+    def test_hopeless_syntax_still_returns_empty_not_error(self, clean_state):
+        self.seed(clean_state, "anything at all")
+        assert clean_state.search('"""') == []

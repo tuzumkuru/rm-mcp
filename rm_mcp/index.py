@@ -398,28 +398,33 @@ class DocumentIndex:
         # Fetch more rows than needed to allow for dedup, but cap to avoid
         # pulling the entire table into memory.
         fetch_limit = limit * 5
+        sql = """
+            SELECT
+                d.doc_id,
+                d.name,
+                d.path,
+                d.file_type,
+                d.modified_at,
+                snippet(pages_fts, 1, '>>>', '<<<', '...', 40) AS snippet,
+                bm25(pages_fts) AS rank
+            FROM pages_fts
+            JOIN documents d ON d.doc_id = pages_fts.doc_id
+            WHERE pages_fts.content MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """
         try:
-            rows = conn.execute(
-                """
-                SELECT
-                    d.doc_id,
-                    d.name,
-                    d.path,
-                    d.file_type,
-                    d.modified_at,
-                    snippet(pages_fts, 1, '>>>', '<<<', '...', 40) AS snippet,
-                    bm25(pages_fts) AS rank
-                FROM pages_fts
-                JOIN documents d ON d.doc_id = pages_fts.doc_id
-                WHERE pages_fts.content MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (query, fetch_limit),
-            ).fetchall()
+            rows = conn.execute(sql, (query, fetch_limit)).fetchall()
         except sqlite3.OperationalError:
-            # Invalid FTS5 query syntax (e.g. unmatched quotes)
-            return []
+            # Ordinary search terms are valid FTS5 syntax right up until they
+            # are not: a hyphen ("agent-based"), a dot, an apostrophe. Rather
+            # than silently returning nothing, retry the query as a quoted
+            # phrase, which treats it as literal text.
+            phrase = '"' + query.replace('"', '""') + '"'
+            try:
+                rows = conn.execute(sql, (phrase, fetch_limit)).fetchall()
+            except sqlite3.OperationalError:
+                return []
 
         # Deduplicate by doc_id, keeping the best-ranked (first) match
         seen: set = set()
@@ -507,6 +512,16 @@ class DocumentIndex:
                 conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
         logger.info("Pruned %d document(s) no longer in the library", len(stale))
         return len(stale)
+
+    def has_indexed_content(self, doc_id: str) -> bool:
+        """Whether any page content is stored for this document.
+
+        `needs_reindex` clears a document's pages when its hash changes, so
+        "has pages" is exactly "content is indexed for the current version".
+        """
+        conn = self._get_connection()
+        row = conn.execute("SELECT 1 FROM pages WHERE doc_id = ? LIMIT 1", (doc_id,)).fetchone()
+        return row is not None
 
     def get_indexed_document_count(self) -> int:
         """Count documents that have at least one indexed page."""
