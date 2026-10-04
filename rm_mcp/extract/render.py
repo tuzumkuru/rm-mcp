@@ -189,6 +189,7 @@ def render_rm_file_to_png(
         rmc_bin = _find_rmc()
         result = subprocess.run(
             [rmc_bin, "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
         )
@@ -307,6 +308,7 @@ def render_rm_file_to_svg(
         rmc_bin = _find_rmc()
         result = subprocess.run(
             [rmc_bin, "-t", "svg", "-o", str(tmp_svg_path), str(rm_file_path)],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
         )
