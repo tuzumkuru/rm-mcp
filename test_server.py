@@ -237,6 +237,36 @@ class TestHelperFunctions:
 # =============================================================================
 
 
+class TestFindRmc:
+    """Test locating the rmc binary next to the running interpreter."""
+
+    @pytest.mark.parametrize(
+        "platform,exe_name", [("win32", "rmc.exe"), ("linux", "rmc"), ("darwin", "rmc")]
+    )
+    def test_finds_rmc_next_to_interpreter(self, tmp_path, platform, exe_name):
+        """The venv's own rmc is found without PATH, using the platform's file name."""
+        from rm_mcp.extract import render
+
+        (tmp_path / exe_name).write_text("")
+        with (
+            patch.object(render.sys, "platform", platform),
+            patch.object(render.sys, "executable", str(tmp_path / "python")),
+            patch.object(render.shutil, "which", return_value=None),
+        ):
+            assert render._find_rmc() == str(tmp_path / exe_name)
+
+    def test_raises_when_rmc_missing(self, tmp_path):
+        """No rmc next to the interpreter or on PATH raises FileNotFoundError."""
+        from rm_mcp.extract import render
+
+        with (
+            patch.object(render.sys, "executable", str(tmp_path / "python")),
+            patch.object(render.shutil, "which", return_value=None),
+        ):
+            with pytest.raises(FileNotFoundError):
+                render._find_rmc()
+
+
 class TestTextExtraction:
     """Test text extraction functions."""
 

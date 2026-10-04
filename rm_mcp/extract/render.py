@@ -74,8 +74,10 @@ def _find_rmc() -> str:
     When running under uvx, the venv's bin/ may not be on PATH,
     so subprocess.run(["rmc", ...]) would fail with FileNotFoundError.
     """
-    # Check next to the current Python executable (same venv bin dir)
-    venv_rmc = Path(sys.executable).parent / "rmc"
+    # Check next to the current Python executable (same venv bin dir).
+    # On Windows the console script is rmc.exe, in Scripts\ rather than bin/.
+    exe_name = "rmc.exe" if sys.platform == "win32" else "rmc"
+    venv_rmc = Path(sys.executable).parent / exe_name
     if venv_rmc.is_file():
         return str(venv_rmc)
     # Fall back to PATH lookup
