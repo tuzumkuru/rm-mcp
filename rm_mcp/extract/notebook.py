@@ -64,6 +64,22 @@ def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
         return []
 
 
+def _page_ids_from_content(data: dict) -> Optional[List[str]]:
+    """Return the notebook's live page IDs in display order, or None if unlisted.
+
+    In the cPages format, a deleted page stays in the list with ``deleted.value``
+    set, and the display order comes from each page's ``idx.value`` string, not
+    from its position in the array.
+    """
+    if "cPages" in data and "pages" in data["cPages"]:
+        live = [p for p in data["cPages"]["pages"] if not (p.get("deleted") or {}).get("value")]
+        live.sort(key=lambda p: (p.get("idx") or {}).get("value", ""))
+        return [p["id"] for p in live]
+    if "pages" in data and isinstance(data["pages"], list):
+        return data["pages"]
+    return None
+
+
 def _get_ordered_rm_files(tmpdir_path: Path) -> List[Optional[Path]]:
     """Extract and order .rm files from an extracted document directory.
 
@@ -79,15 +95,12 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Optional[Path]]:
     """
     # Get page order from .content file
     page_order = []
+    listed_ids = set()  # every listed page, deleted ones included
     for content_file in tmpdir_path.glob("*.content"):
         try:
             data = json.loads(content_file.read_text())
-            # New format: cPages.pages array
-            if "cPages" in data and "pages" in data["cPages"]:
-                page_order = [p["id"] for p in data["cPages"]["pages"]]
-            # Fallback: pages array directly
-            elif "pages" in data and isinstance(data["pages"], list):
-                page_order = data["pages"]
+            page_order = _page_ids_from_content(data) or []
+            listed_ids = {p["id"] for p in data.get("cPages", {}).get("pages", [])}
         except Exception:
             # Ignore errors reading/parsing .content file; fallback to default page order
             pass
@@ -106,8 +119,8 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Optional[Path]]:
         for page_id in page_order:
             # None for blank pages (no .rm file)
             ordered.append(rm_by_id.get(page_id))
-        # Add any remaining files not in page order
-        seen = set(page_order)
+        # Add any remaining files the page list doesn't mention (deleted pages stay out)
+        seen = set(page_order) | listed_ids
         for rm_file in rm_files:
             if rm_file.stem not in seen:
                 ordered.append(rm_file)
@@ -139,10 +152,9 @@ def get_document_page_count(zip_path: Path) -> int:
         for content_file in tmpdir_path.glob("*.content"):
             try:
                 data = json.loads(content_file.read_text())
-                if "cPages" in data and "pages" in data["cPages"]:
-                    return len(data["cPages"]["pages"])
-                if "pages" in data and isinstance(data["pages"], list):
-                    return len(data["pages"])
+                page_ids = _page_ids_from_content(data)
+                if page_ids is not None:
+                    return len(page_ids)
             except Exception:
                 pass
             break

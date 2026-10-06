@@ -267,6 +267,45 @@ class TestFindRmc:
                 render._find_rmc()
 
 
+class TestNotebookPageList:
+    """Page count and order follow the cPages list: deleted pages out, idx order in."""
+
+    @staticmethod
+    def _zip(tmp_path, pages, ink_ids):
+        path = tmp_path / "doc.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("doc.content", json.dumps({"cPages": {"pages": pages}}))
+            for pid in ink_ids:
+                zf.writestr(f"doc/{pid}.rm", b"reMarkable .lines file\x00")
+        return path
+
+    def test_deleted_pages_are_not_counted(self, tmp_path):
+        from rm_mcp.extract.notebook import get_document_page_count
+
+        pages = [
+            {"id": "a", "idx": {"value": "ba"}},
+            {"id": "b", "idx": {"value": "bb"}},
+            {"id": "gone", "idx": {"value": "bc"}, "deleted": {"timestamp": "1:1", "value": 1}},
+        ]
+        assert get_document_page_count(self._zip(tmp_path, pages, ["a", "b", "gone"])) == 2
+
+    def test_pages_follow_idx_and_skip_deleted(self, tmp_path):
+        from rm_mcp.extract.notebook import _get_ordered_rm_files
+
+        pages = [
+            {"id": "second", "idx": {"value": "bc"}},
+            {"id": "gone", "idx": {"value": "ba"}, "deleted": {"timestamp": "1:1", "value": 1}},
+            {"id": "first", "idx": {"value": "bb"}},
+            {"id": "blank", "idx": {"value": "bd"}},
+        ]
+        zip_path = self._zip(tmp_path, pages, ["second", "gone", "first"])
+        out = tmp_path / "x"
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(out)
+        ordered = _get_ordered_rm_files(out)
+        assert [f.stem if f else None for f in ordered] == ["first", "second", None]
+
+
 class TestTextExtraction:
     """Test text extraction functions."""
 
