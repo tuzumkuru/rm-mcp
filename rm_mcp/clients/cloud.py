@@ -615,8 +615,9 @@ def load_client_from_token(token_data: str) -> RemarkableClient:
     Create a client from a token string.
 
     Args:
-        token_data: Either:
+        token_data: One of:
             - JSON string with devicetoken and optional usertoken
+            - rmapi's config: "devicetoken: ..." and "usertoken: ..." lines
             - Raw JWT device token (legacy format from rmapy)
 
     Returns:
@@ -635,6 +636,19 @@ def load_client_from_token(token_data: str) -> RemarkableClient:
         except json.JSONDecodeError:
             pass
 
+    # rmapi's config (YAML): "devicetoken: <jwt>" and "usertoken: <jwt>" lines.
+    # ddvk/rmapi writes this shape, and ~/.rmapi is its traditional location.
+    fields = {}
+    for line in token_data.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() in ("devicetoken", "usertoken"):
+            fields[key.strip()] = value.strip().strip("'\"")
+    if fields.get("devicetoken"):
+        return RemarkableClient(
+            device_token=fields["devicetoken"],
+            user_token=fields.get("usertoken", ""),
+        )
+
     # Treat as raw device token (legacy rmapy format - just the JWT)
     # JWT tokens start with "eyJ" (base64 encoded '{"')
     if token_data.startswith("eyJ"):
@@ -642,8 +656,8 @@ def load_client_from_token(token_data: str) -> RemarkableClient:
 
     # Never echo the token itself — this message reaches logs and tool output.
     raise ValueError(
-        "Invalid token format. Expected either a JSON object with a "
-        "'devicetoken' key, or a raw JWT device token.\n"
+        "Invalid token format. Expected a JSON object with a 'devicetoken' "
+        "key, rmapi's 'devicetoken: ...' config, or a raw JWT device token.\n"
         f"Got {len(token_data)} characters that match neither shape.\n"
         "Re-authenticate by running: uvx rm-mcp --setup"
     )

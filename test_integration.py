@@ -883,6 +883,20 @@ class TestTokenHandling:
         assert secret not in str(exc.value)
         assert "rm-mcp --setup" in str(exc.value)
 
+    def test_reads_rmapi_yaml_config(self):
+        from rm_mcp.clients.cloud import load_client_from_token
+
+        client = load_client_from_token("devicetoken: eyJdevice\nusertoken: eyJuser\n")
+        assert client.device_token == "eyJdevice"
+        assert client.user_token == "eyJuser"
+
+    def test_reads_rmapi_yaml_config_without_user_token(self):
+        from rm_mcp.clients.cloud import load_client_from_token
+
+        client = load_client_from_token('devicetoken: "eyJdevice"\nusertoken: ""\n')
+        assert client.device_token == "eyJdevice"
+        assert client.user_token == ""
+
 
 # =============================================================================
 # RM-10 — the loader must not re-read the library once per batch
